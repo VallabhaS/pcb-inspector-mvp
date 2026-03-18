@@ -1,24 +1,24 @@
 """
-Vision API analyzer using Claude's multimodal capabilities.
+Vision API analyzer using Google Gemini's multimodal capabilities.
 
-This module sends inspection images to Claude with domain-specific PCB/semiconductor
-prompting and parses structured defect analysis back. It serves as the "semantic brain"
-of the pipeline — understanding WHAT a defect is and WHY it matters — while the CNN
-module (image_analyzer.py) handles spatial localization (WHERE it is).
+This module sends inspection images to Gemini with domain-specific
+PCB/semiconductor prompting and parses structured defect analysis back.
+It serves as the "semantic brain" of the pipeline — understanding WHAT a
+defect is and WHY it matters — while the CNN module (image_analyzer.py)
+handles spatial localization (WHERE it is).
 
 This is NOT a generic "ask the AI" wrapper. The prompt engineering encodes
 PCB inspection domain knowledge, enforces structured output, and the results
 are cross-validated against the CNN's independent analysis.
 """
 
-import base64
 import json
-import io
 import os
 from dataclasses import dataclass, field
 
-import anthropic
 from dotenv import load_dotenv
+from google import genai
+from google.genai import types
 from PIL import Image
 
 load_dotenv()
@@ -85,65 +85,47 @@ If the image is not an inspection image, set is_inspection_image to false and ex
 # ── Analyzer class ───────────────────────────────────────────────────────────
 
 class VisionAnalyzer:
-    """Claude-powered semantic defect analyzer for inspection images."""
+    """Gemini-powered semantic defect analyzer for inspection images."""
 
     def __init__(self):
-        api_key = os.getenv("ANTHROPIC_API_KEY")
+        api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             raise ValueError(
-                "ANTHROPIC_API_KEY not found. "
+                "GEMINI_API_KEY not found. "
                 "Set it in .env or as an environment variable."
             )
-        self.client = anthropic.Anthropic(api_key=api_key)
-        self.model = "claude-sonnet-4-20250514"
+        self.client = genai.Client(api_key=api_key)
+        self.model = "gemini-2.5-flash"
 
     def analyze(self, image: Image.Image) -> VisionAnalysisResult:
         """
-        Send an inspection image to Claude for semantic defect analysis.
+        Send an inspection image to Gemini for semantic defect analysis.
 
         Returns structured findings that complement the CNN's spatial analysis.
         """
-        # Encode image to base64
-        image_data = self._encode_image(image)
+        # Ensure image is RGB
+        image_rgb = image.convert("RGB")
 
-        # Call Claude with the inspection image
-        response = self.client.messages.create(
+        # Call Gemini with the inspection image
+        response = self.client.models.generate_content(
             model=self.model,
-            max_tokens=1500,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/png",
-                                "data": image_data,
-                            },
-                        },
-                        {
-                            "type": "text",
-                            "text": "Analyze this inspection image for defects. Follow the system instructions exactly.",
-                        },
-                    ],
-                }
+            contents=[
+                "Analyze this inspection image for defects. "
+                "Follow the system instructions exactly.",
+                image_rgb,
             ],
-            system=_SYSTEM_PROMPT,
+            config=types.GenerateContentConfig(
+                system_instruction=_SYSTEM_PROMPT,
+                max_output_tokens=1500,
+                temperature=0.2,
+            ),
         )
 
-        raw_text = response.content[0].text
+        raw_text = response.text
         return self._parse_response(raw_text)
 
-    def _encode_image(self, image: Image.Image) -> str:
-        """Convert PIL image to base64 string."""
-        buffer = io.BytesIO()
-        # Convert to RGB if needed (handles RGBA, palette, etc.)
-        image.convert("RGB").save(buffer, format="PNG")
-        return base64.b64encode(buffer.getvalue()).decode("utf-8")
-
     def _parse_response(self, raw_text: str) -> VisionAnalysisResult:
-        """Parse Claude's JSON response into a structured result."""
+        """Parse Gemini's JSON response into a structured result."""
         try:
             # Handle cases where the model wraps JSON in markdown code blocks
             cleaned = raw_text.strip()
