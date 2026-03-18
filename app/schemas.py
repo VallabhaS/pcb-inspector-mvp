@@ -37,6 +37,9 @@ class AnalysisResponse(BaseModel):
     heatmap_path: str | None = Field(None, description="Path to heatmap overlay image")
     metadata_used: dict | None = Field(None, description="Metadata that was factored into risk")
 
+    # Hybrid analysis detail
+    analysis_detail: dict | None = Field(None, description="Cross-validation and multi-model analysis breakdown")
+
     model_config = ConfigDict(json_schema_extra={
         "example": {
             "result_id": "insp_20240101_120000_abc123",

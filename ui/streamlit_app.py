@@ -1,16 +1,13 @@
 """
 Streamlit frontend for PCB Inspector MVP.
 
-Provides:
-  - Image upload
-  - Optional metadata input
-  - Analysis trigger
-  - Results display with heatmap, scores, and explanation
-  - History of past inspections
+Hybrid analysis UI — shows CNN heatmap, vision model reasoning,
+cross-validation status, scores, and actionable explanation.
 """
 
 import sys
 from pathlib import Path
+from io import BytesIO
 
 import requests
 import streamlit as st
@@ -30,10 +27,10 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("PCB Inspector MVP")
+st.title("PCB Inspector")
 st.caption(
-    "Upload a PCB / chip / wafer inspection image to detect defects, "
-    "assess severity, and estimate failure risk."
+    "Hybrid CNN + Vision AI inspection system. "
+    "Upload a PCB / chip / wafer image for defect analysis."
 )
 
 # ── Sidebar: metadata inputs ────────────────────────────────────────────────
@@ -50,6 +47,13 @@ environment = st.sidebar.selectbox(
     ["indoor", "outdoor", "automotive", "aerospace"],
 )
 
+st.sidebar.divider()
+st.sidebar.caption(
+    "**How it works:** Two independent models analyze your image — "
+    "a CNN for spatial anomaly detection and Claude's vision AI for "
+    "semantic understanding. Results are cross-validated for reliability."
+)
+
 # ── Main: image upload ──────────────────────────────────────────────────────
 
 uploaded_file = st.file_uploader(
@@ -57,18 +61,17 @@ uploaded_file = st.file_uploader(
     type=["png", "jpg", "jpeg", "bmp", "tiff"],
 )
 
-col_img, col_result = st.columns([1, 1])
-
 if uploaded_file is not None:
     image = Image.open(uploaded_file)
+
+    col_img, col_heat = st.columns([1, 1])
     with col_img:
-        st.subheader("Uploaded Image")
+        st.subheader("Original Image")
         st.image(image, use_container_width=True)
 
     if st.button("Run Analysis", type="primary"):
-        with st.spinner("Analyzing image..."):
+        with st.spinner("Analyzing with CNN + Vision AI — this takes a few seconds..."):
             try:
-                # Send to FastAPI backend
                 uploaded_file.seek(0)
                 files = {"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
                 data = {
@@ -78,74 +81,131 @@ if uploaded_file is not None:
                     "is_lead_free": is_lead_free,
                     "environment": environment,
                 }
-                response = requests.post(f"{API_URL}/analyze", files=files, data=data, timeout=60)
+                response = requests.post(f"{API_URL}/analyze", files=files, data=data, timeout=120)
                 response.raise_for_status()
                 result = response.json()
 
             except requests.ConnectionError:
                 st.error(
                     "Cannot connect to the API. "
-                    "Make sure the FastAPI backend is running on "
-                    f"{API_URL} (run `bash run.sh` or start it manually)."
+                    f"Make sure the backend is running on {API_URL}."
                 )
                 st.stop()
             except Exception as e:
                 st.error(f"Analysis failed: {e}")
                 st.stop()
 
-        # ── Display results ──────────────────────────────────────────────
-
-        with col_result:
-            st.subheader("Analysis Results")
-
-            # Score cards
-            score_cols = st.columns(3)
-            with score_cols[0]:
-                st.metric("Severity", f"{result['severity']}/100")
-            with score_cols[1]:
-                st.metric("Failure Risk", f"{result['failure_risk']}/100")
-            with score_cols[2]:
-                st.metric("Confidence", f"{result['confidence']:.0%}")
-
-            # Defect category
-            cat = result["defect_category"]
-            if cat == "normal":
-                st.success(f"Defect Category: **{cat}**")
-            else:
-                st.warning(f"Defect Category: **{cat}**")
-
-            # Heatmap
+        # ── Heatmap ──────────────────────────────────────────────────────
+        with col_heat:
+            st.subheader("CNN Anomaly Heatmap")
             if result.get("heatmap_path"):
-                st.subheader("Suspicious Region Heatmap")
                 try:
                     heatmap_resp = requests.get(
                         f"{API_URL}/heatmap/{result['result_id']}", timeout=10
                     )
                     if heatmap_resp.status_code == 200:
-                        from io import BytesIO
                         heatmap_img = Image.open(BytesIO(heatmap_resp.content))
                         st.image(heatmap_img, use_container_width=True)
+                        st.caption("Warm colors = regions the CNN flagged as anomalous")
                 except Exception:
-                    st.info("Heatmap generated but could not be loaded for display.")
+                    st.info("Heatmap could not be loaded.")
 
-            # Explanation
-            st.subheader("Explanation")
-            st.text(result["explanation"])
+        st.divider()
 
-            # Risk breakdown
-            st.subheader("Risk Breakdown")
-            breakdown = result["risk_breakdown"]
-            st.bar_chart(
-                {
-                    "Image severity": breakdown["image_severity_contribution"],
-                    "Defect type": breakdown["defect_type_contribution"],
-                    "Metadata": breakdown["metadata_contribution"],
-                }
+        # ── Analysis mode badge ──────────────────────────────────────────
+        detail = result.get("analysis_detail") or {}
+        mode = detail.get("mode", "unknown")
+        if mode == "hybrid":
+            st.success("**Analysis mode: Hybrid** — CNN spatial analysis + Claude Vision AI semantic analysis")
+        else:
+            st.warning(
+                "**Analysis mode: CNN-only** — Vision API unavailable. "
+                "Add credits at console.anthropic.com for full hybrid analysis."
             )
 
-            # Raw JSON (collapsed)
-            with st.expander("Raw JSON Response"):
-                st.json(result)
+        # ── Score cards ──────────────────────────────────────────────────
+        score_cols = st.columns(4)
+        with score_cols[0]:
+            cat = result["defect_category"]
+            color = "🟢" if cat == "normal" else "🔴"
+            st.metric("Defect", f"{color} {cat}")
+        with score_cols[1]:
+            st.metric("Severity", f"{result['severity']}/100")
+        with score_cols[2]:
+            st.metric("Failure Risk", f"{result['failure_risk']}/100")
+        with score_cols[3]:
+            st.metric("Confidence", f"{result['confidence']:.0%}")
+
+        # ── Cross-validation status ──────────────────────────────────────
+        agreement = detail.get("agreement", "unknown")
+
+        if agreement == "strong":
+            st.success(
+                f"**Cross-validation: STRONG agreement** — Both CNN and Vision AI "
+                f"independently identified **{cat}**. High confidence in this finding."
+            )
+        elif agreement == "partial":
+            st.warning(
+                f"**Cross-validation: Partial agreement** — "
+                f"CNN detected *{detail.get('cnn_category', '?')}*, "
+                f"Vision AI detected *{detail.get('vision_category', '?')}*. "
+                f"Using Vision AI's classification (better semantic understanding)."
+            )
+        elif agreement == "disagreement":
+            st.error(
+                f"**Cross-validation: DISAGREEMENT** — "
+                f"CNN detected *{detail.get('cnn_category', '?')}*, "
+                f"Vision AI detected *{detail.get('vision_category', '?')}*. "
+                f"Manual review recommended."
+            )
+
+        # ── Board description ────────────────────────────────────────────
+        if detail.get("board_description"):
+            st.info(f"**Board context:** {detail['board_description']}")
+
+        # ── All defects found ────────────────────────────────────────────
+        all_defects = detail.get("all_defects_found", [])
+        if all_defects:
+            st.subheader("Defects Found")
+            for i, defect in enumerate(all_defects, 1):
+                severity_colors = {
+                    "low": "🟡", "medium": "🟠", "high": "🔴", "critical": "⛔"
+                }
+                icon = severity_colors.get(defect.get("severity", ""), "⚪")
+                with st.expander(
+                    f"{icon} Defect #{i}: {defect['type']} — "
+                    f"{defect.get('severity', 'unknown')} severity "
+                    f"({defect.get('confidence', 0):.0%} confidence)"
+                ):
+                    st.write(f"**Description:** {defect.get('description', 'N/A')}")
+                    st.write(f"**Location:** {defect.get('location', 'N/A')}")
+
+        # ── Risk breakdown ───────────────────────────────────────────────
+        st.subheader("Risk Breakdown")
+        breakdown = result["risk_breakdown"]
+        risk_cols = st.columns(3)
+        with risk_cols[0]:
+            val = breakdown["image_severity_contribution"]
+            st.metric("Image Severity", f"{val:.1f}%")
+        with risk_cols[1]:
+            val = breakdown["defect_type_contribution"]
+            st.metric("Defect Type Risk", f"{val:.1f}%")
+        with risk_cols[2]:
+            val = breakdown["metadata_contribution"]
+            st.metric("Metadata Factors", f"{val:.1f}%")
+
+        # ── Vision AI reasoning ──────────────────────────────────────────
+        if detail.get("vision_reasoning"):
+            st.subheader("Vision AI Reasoning")
+            st.write(detail["vision_reasoning"])
+
+        # ── Full explanation ─────────────────────────────────────────────
+        with st.expander("Full Explanation"):
+            st.text(result["explanation"])
+
+        # ── Raw JSON ─────────────────────────────────────────────────────
+        with st.expander("Raw JSON Response"):
+            st.json(result)
 
 # ── History section ──────────────────────────────────────────────────────────
 
@@ -160,8 +220,11 @@ try:
             st.info("No past inspections yet. Upload an image to get started.")
         else:
             for item in history:
+                detail = item.get("analysis_detail") or {}
+                agreement = detail.get("agreement", "")
+                badge = {"strong": "✅", "partial": "⚠️", "disagreement": "❌"}.get(agreement, "")
                 with st.expander(
-                    f"{item['filename']} — {item['defect_category']} "
+                    f"{badge} {item['filename']} — {item['defect_category']} "
                     f"(severity {item['severity']}, risk {item['failure_risk']})"
                 ):
                     st.json(item)
